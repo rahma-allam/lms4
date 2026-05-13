@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useLocation } from "wouter";
 import { useAuth } from "@/lib/auth";
 import { useI18n } from "@/lib/i18n";
@@ -96,10 +96,23 @@ function QuizWidget({ lessonId, studentId }: { lessonId: number; studentId: numb
   const [result, setResult] = useState<{ score: number; passed: boolean; correctAnswers: number; totalQuestions: number; passingScore: number } | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
+  const quizFetch = (url: string, options?: RequestInit) => {
+    const token  = localStorage.getItem("auth_token");
+    const tenant = localStorage.getItem("tenant_slug");
+    const sep    = url.includes("?") ? "&" : "?";
+    return fetch(`${url}${tenant ? `${sep}tenant=${tenant}` : ""}`, {
+      ...options,
+      headers: {
+        ...(options?.headers ?? {}),
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+    });
+  };
+
   const { data: quiz, isLoading } = useQuery<any>({
     queryKey: ["quiz", "lesson", lessonId],
     queryFn: async () => {
-      const res = await fetch(`/api/quizzes/lesson/${lessonId}`);
+      const res = await quizFetch(`/api/quizzes/lesson/${lessonId}`);
       if (res.status === 404) return null;
       if (!res.ok) throw new Error("Failed to fetch quiz");
       return res.json();
@@ -111,7 +124,7 @@ function QuizWidget({ lessonId, studentId }: { lessonId: number; studentId: numb
     queryKey: ["quiz-attempt", quiz?.id, studentId],
     queryFn: async () => {
       if (!quiz?.id) return null;
-      const res = await fetch(`/api/quizzes/${quiz.id}/attempts/${studentId}`);
+      const res = await quizFetch(`/api/quizzes/${quiz.id}/attempts/${studentId}`);
       if (res.status === 404) return null;
       if (!res.ok) throw new Error();
       return res.json();
@@ -135,7 +148,7 @@ function QuizWidget({ lessonId, studentId }: { lessonId: number; studentId: numb
     const answersArr = quiz.questions.map((_: any, i: number) => answers[i] ?? -1);
     setSubmitting(true);
     try {
-      const res = await fetch(`/api/quizzes/${quiz.id}/submit`, {
+      const res = await quizFetch(`/api/quizzes/${quiz.id}/submit`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ studentId, answers: answersArr }),
@@ -231,9 +244,14 @@ function LessonItem({
     if (isDone || marking) return;
     setMarking(true);
     try {
-      await fetch(`/api/lessons/${lesson.id}/complete`, {
+      const token  = localStorage.getItem("auth_token");
+      const tenant = localStorage.getItem("tenant_slug");
+      await fetch(`/api/lessons/${lesson.id}/complete${tenant ? `?tenant=${tenant}` : ""}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
         body: JSON.stringify({ studentId }),
       });
       onComplete(lesson.id);
@@ -282,75 +300,231 @@ function LessonItem({
   );
 }
 
-type Message = { id: string; from: "student" | "instructor"; text: string; time: string };
+// ── تايب الرسالة الجاية من الـ API ──────────────────────────────────────────
+type ApiMessage = {
+  id: number;
+  senderType: "instructor" | "student";
+  senderId: number;
+  senderName: string;
+  content: string | null;
+  createdAt: string;
+  attachments: { id: number; filename: string; storedFilename: string; mimeType: string; size: number }[];
+};
 
-function MessagesTab({ studentId, lang }: { studentId: number; studentName: string; lang: string }) {
-  const STORAGE_KEY = `lms_messages_${studentId}`;
-  const [messages, setMessages] = useState<Message[]>(() => {
-    try { return JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "[]"); }
-    catch { return []; }
-  });
-  const [input, setInput] = useState("");
+function MessagesTab({
+  studentId,
+  studentName,
+  courseId,
+  lang,
+}: {
+  studentId: number;
+  studentName: string;
+  courseId: number | null | undefined;
+  lang: string;
+}) {
+  const [messages, setMessages]   = useState<ApiMessage[]>([]);
+  const [input, setInput]         = useState("");
+  const [sending, setSending]     = useState(false);
+  const [loading, setLoading]     = useState(true);
+  const [error, setError]         = useState<string | null>(null);
+  const lastIdRef                 = useRef<number>(0);
+  const bottomRef                 = useRef<HTMLDivElement>(null);
 
-  const save = (msgs: Message[]) => {
-    setMessages(msgs);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(msgs));
+  // ── رابط الـ API (private chat طالب ↔ مدرب) ──────────────────────────
+  const baseUrl = courseId
+    ? `/api/instructors/chat/${courseId}/private/${studentId}`
+    : null;
+
+  // ── جلب الرسائل (أولي + polling) ─────────────────────────────────────
+  const fetchMessages = async (initial = false) => {
+    if (!baseUrl) return;
+    try {
+      const url = initial || lastIdRef.current === 0
+        ? baseUrl
+        : `${baseUrl}?since=${encodeURIComponent(
+            messages[messages.length - 1]?.createdAt ?? ""
+          )}`;
+      const token  = localStorage.getItem("auth_token");
+      const tenant = localStorage.getItem("tenant_slug");
+      const sep    = url.includes("?") ? "&" : "?";
+      const res    = await fetch(`${url}${tenant ? `${sep}tenant=${tenant}` : ""}`, {
+        headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+      });
+      if (!res.ok) throw new Error("fetch failed");
+      const data: ApiMessage[] = await res.json();
+      if (initial) {
+        setMessages(data);
+        if (data.length) lastIdRef.current = data[data.length - 1]!.id;
+        setLoading(false);
+      } else if (data.length) {
+        setMessages((prev) => {
+          // تجنب التكرار بناءً على الـ id
+          const existingIds = new Set(prev.map((m) => m.id));
+          const newMsgs = data.filter((m) => !existingIds.has(m.id));
+          return newMsgs.length ? [...prev, ...newMsgs] : prev;
+        });
+        lastIdRef.current = data[data.length - 1]!.id;
+      }
+    } catch {
+      if (initial) {
+        setError(lang === "ar" ? "تعذّر تحميل الرسائل" : "Failed to load messages");
+        setLoading(false);
+      }
+    }
   };
 
-  const send = () => {
+  // جلب أولي
+  useEffect(() => {
+    if (!baseUrl) { setLoading(false); return; }
+    setLoading(true);
+    setError(null);
+    setMessages([]);
+    lastIdRef.current = 0;
+    fetchMessages(true);
+  }, [baseUrl]);
+
+  // Polling كل 5 ثواني
+  useEffect(() => {
+    if (!baseUrl) return;
+    const id = setInterval(() => fetchMessages(false), 5000);
+    return () => clearInterval(id);
+  }, [baseUrl, messages]);
+
+  // scroll للأسفل عند وصول رسائل جديدة
+  useEffect(() => {
+    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
+
+  // ── إرسال رسالة ──────────────────────────────────────────────────────
+  const send = async () => {
     const text = input.trim();
-    if (!text) return;
-    const msg: Message = { id: crypto.randomUUID(), from: "student", text, time: new Date().toISOString() };
-    const updated = [...messages, msg];
-    save(updated);
-    setInput("");
-    setTimeout(() => {
-      const reply: Message = {
-        id: crypto.randomUUID(), from: "instructor",
-        text: lang === "ar" ? "شكراً على رسالتك! سأرد عليك في أقرب وقت ممكن." : "Thanks for your message! I'll get back to you soon.",
-        time: new Date().toISOString(),
-      };
-      save([...updated, reply]);
-    }, 1500);
+    if (!text || !courseId) return;
+    setSending(true);
+    try {
+      const token  = localStorage.getItem("auth_token");
+      const tenant = localStorage.getItem("tenant_slug");
+      const formData = new FormData();
+      formData.append("senderType", "student");
+      formData.append("senderId", String(studentId));
+      formData.append("senderName", studentName);
+      formData.append("content", text);
+      formData.append("recipientStudentId", String(studentId));
+      const res = await fetch(
+        `/api/instructors/chat/${courseId}${tenant ? `?tenant=${tenant}` : ""}`,
+        {
+          method: "POST",
+          headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+          body: formData,
+        }
+      );
+      if (!res.ok) throw new Error();
+      const msg: ApiMessage = await res.json();
+      setMessages((prev) => [...prev, msg]);
+      lastIdRef.current = msg.id;
+      setInput("");
+    } catch {
+      // يظهر toast لو حاب تضيف
+    } finally {
+      setSending(false);
+    }
   };
+
+  // ── مساعدة: هل الرسالة من الطالب الحالي؟ ────────────────────────────
+  const isOwn = (msg: ApiMessage) =>
+    msg.senderType === "student" && msg.senderId === studentId;
+
+  // ── لو مفيش courseId ──────────────────────────────────────────────────
+  if (!courseId) {
+    return (
+      <div className="bg-card border border-border rounded-2xl flex flex-col items-center justify-center py-16 text-muted-foreground text-sm">
+        <MessageCircle className="w-10 h-10 mb-3 opacity-30" />
+        <p>{lang === "ar" ? "يجب التسجيل في كورس أولاً" : "Enroll in a course first"}</p>
+      </div>
+    );
+  }
 
   return (
     <div className="bg-card border border-border rounded-2xl overflow-hidden flex flex-col" style={{ minHeight: 400 }}>
+      {/* Header */}
       <div className="px-5 py-4 border-b border-border flex items-center gap-2">
         <MessageCircle className="w-4 h-4 text-primary" />
-        <span className="font-semibold text-sm">{lang === "ar" ? "رسائل المدرب" : "Instructor Messages"}</span>
+        <span className="font-semibold text-sm">
+          {lang === "ar" ? "رسائل المدرب" : "Instructor Messages"}
+        </span>
+        {/* نقطة خضراء تدل على الـ polling */}
+        <span className="ml-auto flex items-center gap-1.5 text-xs text-emerald-500">
+          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" />
+          {lang === "ar" ? "مباشر" : "Live"}
+        </span>
       </div>
+
+      {/* جسم الرسائل */}
       <div className="flex-1 overflow-y-auto p-4 space-y-3" style={{ maxHeight: 380 }}>
-        {messages.length === 0 && (
+        {loading && (
+          <div className="flex justify-center py-10">
+            <Loader2 className="w-5 h-5 animate-spin text-muted-foreground" />
+          </div>
+        )}
+        {!loading && error && (
+          <div className="text-center py-10 text-destructive text-sm">{error}</div>
+        )}
+        {!loading && !error && messages.length === 0 && (
           <div className="text-center py-12 text-muted-foreground text-sm">
             <MessageCircle className="w-10 h-10 mx-auto mb-3 opacity-30" />
             <p>{lang === "ar" ? "ابدأ محادثة مع مدربك" : "Start a conversation with your instructor"}</p>
           </div>
         )}
         {messages.map((msg) => (
-          <div key={msg.id} className={cn("flex", msg.from === "student" ? "justify-end" : "justify-start")}>
+          <div key={msg.id} className={cn("flex", isOwn(msg) ? "justify-end" : "justify-start")}>
             <div className={cn(
               "max-w-xs rounded-2xl px-4 py-2.5 text-sm",
-              msg.from === "student"
+              isOwn(msg)
                 ? "bg-primary text-primary-foreground rounded-br-sm"
                 : "bg-muted text-foreground rounded-bl-sm"
             )}>
-              <p>{msg.text}</p>
+              {!isOwn(msg) && (
+                <p className="text-[10px] font-medium mb-1 opacity-70">{msg.senderName} 👨‍🏫</p>
+              )}
+              {msg.content && <p>{msg.content}</p>}
+              {msg.attachments?.map((att) => (
+                <a
+                  key={att.id}
+                  href={`/api/instructors/attachments/${att.storedFilename}`}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-1.5 mt-1 text-xs underline opacity-80"
+                >
+                  📎 {att.filename}
+                </a>
+              ))}
               <p className="text-[10px] opacity-60 mt-1">
-                {new Date(msg.time).toLocaleTimeString(lang === "ar" ? "ar-EG" : "en-US", { hour: "2-digit", minute: "2-digit" })}
+                {new Date(msg.createdAt).toLocaleTimeString(
+                  lang === "ar" ? "ar-EG" : "en-US",
+                  { hour: "2-digit", minute: "2-digit" }
+                )}
               </p>
             </div>
           </div>
         ))}
+        <div ref={bottomRef} />
       </div>
+
+      {/* Input الإرسال */}
       <div className="border-t border-border p-4 flex gap-2">
-        <input value={input} onChange={(e) => setInput(e.target.value)}
+        <input
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && (e.preventDefault(), send())}
           placeholder={lang === "ar" ? "اكتب رسالتك..." : "Type a message..."}
           className="flex-1 bg-muted rounded-xl px-4 py-2.5 text-sm outline-none focus:ring-2 focus:ring-primary/30 border border-transparent"
-          dir={lang === "ar" ? "rtl" : "ltr"} />
-        <Button size="sm" onClick={send} disabled={!input.trim()} className="gap-1.5 px-4">
-          <Send className="w-3.5 h-3.5" />
+          dir={lang === "ar" ? "rtl" : "ltr"}
+          disabled={sending}
+        />
+        <Button size="sm" onClick={send} disabled={!input.trim() || sending} className="gap-1.5 px-4">
+          {sending
+            ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+            : <Send className="w-3.5 h-3.5" />
+          }
         </Button>
       </div>
     </div>
@@ -365,6 +539,8 @@ export default function StudentPortal() {
   const [openModules, setOpenModules] = useState<Record<number, boolean>>({});
   const [activeVideo, setActiveVideo] = useState<{ url: string; title: string } | null>(null);
   const [completedIds, setCompletedIds] = useState<Set<number>>(new Set());
+  // الكورس المختار في الـ lessons tab
+  const [selectedCourseId, setSelectedCourseId] = useState<number | null>(null);
 
   // ✅ student data من الـ auth/me
   const { data: student, isLoading: studentLoading, refetch: refetchStudent } = useQuery({
@@ -374,14 +550,27 @@ export default function StudentPortal() {
     refetchInterval: 30_000,
   });
 
-  // ✅ course data من الـ storefront
+  // ✅ enrollments — كل الكورسات اللي الطالب مشترك فيها
+  const { data: enrollments } = useQuery<any[]>({
+    queryKey: [`/api/enrollments?studentId=${user?.id}`],
+    queryFn: () => fetchWithStudentAuth(`/api/enrollments?studentId=${user!.id}`),
+    enabled: !!user?.id,
+  });
+
+  // activeCourseId = المختار أو أول كورس في الـ enrollments كـ fallback
+  const activeCourseId = selectedCourseId
+    ?? (enrollments && enrollments.length > 0 ? enrollments[0].courseId : null)
+    ?? user?.courseId
+    ?? null;
+
+  // ✅ course data للكورس المختار
   const { data: course, isLoading: courseLoading } = useQuery({
-    queryKey: ["student-course", user?.courseId],
-    queryFn: () => fetchWithStudentAuth(`/api/storefront/courses/${user!.courseId}`),
-    enabled: !!user?.courseId,
-    staleTime: 0,              // دايماً اعتبر البيانات قديمة
-    refetchOnWindowFocus: true, // اجيب من جديد لما الطالب يرجع للتاب
-    refetchInterval: 60_000,   // وكل دقيقة في الخلفية
+    queryKey: ["student-course", activeCourseId],
+    queryFn: () => fetchWithStudentAuth(`/api/storefront/courses/${activeCourseId}`),
+    enabled: !!activeCourseId,
+    staleTime: 0,
+    refetchOnWindowFocus: true,
+    refetchInterval: 60_000,
   });
 
   const isActive = student?.status === "active";
@@ -405,13 +594,7 @@ export default function StudentPortal() {
     setTimeout(() => refetchStudent(), 500);
   };
 
-  // ✅ enrollments و certificates — لازم تكون قبل أي early return
-  const { data: enrollments } = useQuery<any[]>({
-    queryKey: [`/api/enrollments?studentId=${user?.id}`],
-    queryFn: () => fetchWithStudentAuth(`/api/enrollments?studentId=${user!.id}`),
-    enabled: !!user?.id,
-  });
-
+  // ✅ certificates
   const { data: myCerts } = useQuery<any[]>({
     queryKey: [`/api/certificates/student/${user?.id}`],
     queryFn: () => fetchWithStudentAuth(`/api/certificates/student/${user!.id}`),
@@ -481,7 +664,11 @@ export default function StudentPortal() {
                       {isActive ? (lang === "ar" ? "نشط" : "Active") : (lang === "ar" ? "قيد الانتظار" : "Pending")}
                     </span>
                     {course && (
-                      <span className="text-xs text-muted-foreground truncate max-w-48">{courseTitle}</span>
+                      <span className="text-xs text-muted-foreground truncate max-w-48">
+                        {enrollments && enrollments.length > 1
+                          ? `${enrollments.length} ${lang === "ar" ? "كورسات" : "courses"}`
+                          : courseTitle}
+                      </span>
                     )}
                   </div>
                 </div>
@@ -561,38 +748,72 @@ export default function StudentPortal() {
                   )}
                 </div>
 
-                {courseLoading && <div className="h-32 bg-muted animate-pulse rounded-2xl" />}
-                {course && (
-                  <div className="bg-card border border-border rounded-2xl overflow-hidden">
-                    <div className="h-32 bg-gradient-to-br from-primary/20 to-primary/5 relative flex items-center justify-center">
-                      {course.thumbnailUrl ? (
-                        <img src={course.thumbnailUrl} alt={courseTitle} className="w-full h-full object-cover absolute inset-0" />
-                      ) : (
-                        isLive ? <Radio className="w-12 h-12 text-primary/30" /> : <GraduationCap className="w-12 h-12 text-primary/30" />
-                      )}
-                      <div className="absolute inset-0 bg-gradient-to-t from-black/50 to-transparent" />
-                      <div className="absolute bottom-3 start-4 end-4">
-                        <span className={cn("text-[10px] font-bold px-2.5 py-0.5 rounded-full text-white", isLive ? "bg-red-500" : "bg-primary")}>
-                          {isLive ? (lang === "ar" ? "مباشر" : "Live") : (lang === "ar" ? "مسجّل" : "Recorded")}
-                        </span>
-                      </div>
-                    </div>
-                    <div className="p-5">
-                      <h3 className="font-bold text-lg mb-1">{courseTitle}</h3>
-                      {course.description && <p className="text-sm text-muted-foreground mb-3 line-clamp-2">{course.description}</p>}
-                      <div className="flex items-center gap-4 text-xs text-muted-foreground">
-                        <span className="flex items-center gap-1"><BookOpen className="w-3.5 h-3.5" />{course.moduleCount} {lang === "ar" ? "وحدات" : "modules"}</span>
-                        <span className="flex items-center gap-1"><PlayCircle className="w-3.5 h-3.5" />{totalLessons} {lang === "ar" ? "دروس" : "lessons"}</span>
-                      </div>
-                      <Button className="w-full mt-4 gap-2" onClick={() => setActiveTab("lessons")} disabled={!isActive}>
-                        <PlayCircle className="w-4 h-4" />
-                        {isActive ? (lang === "ar" ? "ابدأ التعلم" : "Start Learning") : (lang === "ar" ? "في انتظار التفعيل" : "Awaiting Activation")}
-                      </Button>
-                    </div>
+                {/* ── كل الكورسات المشترك فيها ── */}
+                {enrollments && enrollments.length > 0 ? (
+                  <div className="space-y-3">
+                    <p className="text-sm font-semibold text-muted-foreground px-1">
+                      {lang === "ar" ? "كوراتي المسجّلة" : "My Enrolled Courses"} ({enrollments.length})
+                    </p>
+                    {enrollments.map((enroll: any) => {
+                      const ct = lang === "ar" ? (enroll.courseTitleAr || enroll.courseTitle) : enroll.courseTitle;
+                      const isSelected = (selectedCourseId ?? enrollments[0]?.courseId) === enroll.courseId;
+                      const isEnrollActive = enroll.status === "active";
+                      return (
+                        <div key={enroll.id}
+                          className={cn(
+                            "bg-card border rounded-2xl overflow-hidden transition-all",
+                            isSelected ? "border-primary ring-1 ring-primary/30" : "border-border"
+                          )}>
+                          {/* thumbnail */}
+                          <div className="h-28 bg-gradient-to-br from-primary/20 to-primary/5 relative flex items-center justify-center">
+                            {enroll.thumbnailUrl ? (
+                              <img src={enroll.thumbnailUrl} alt={ct} className="w-full h-full object-cover absolute inset-0" />
+                            ) : (
+                              enroll.courseType === "live"
+                                ? <Radio className="w-10 h-10 text-primary/30" />
+                                : <GraduationCap className="w-10 h-10 text-primary/30" />
+                            )}
+                            <div className="absolute inset-0 bg-gradient-to-t from-black/50 to-transparent" />
+                            <div className="absolute bottom-2 start-3 end-3 flex items-center justify-between gap-2">
+                              <span className={cn("text-[10px] font-bold px-2 py-0.5 rounded-full text-white shrink-0",
+                                enroll.courseType === "live" ? "bg-red-500" : "bg-primary")}>
+                                {enroll.courseType === "live" ? (lang === "ar" ? "مباشر" : "Live") : (lang === "ar" ? "مسجّل" : "Recorded")}
+                              </span>
+                              <span className={cn("text-[10px] font-semibold px-2 py-0.5 rounded-full shrink-0",
+                                isEnrollActive
+                                  ? "bg-emerald-500 text-white"
+                                  : "bg-amber-500 text-white")}>
+                                {isEnrollActive ? (lang === "ar" ? "نشط" : "Active") : (lang === "ar" ? "معلق" : "Pending")}
+                              </span>
+                            </div>
+                          </div>
+                          <div className="p-4">
+                            <h3 className="font-bold text-sm mb-2 line-clamp-2">{ct}</h3>
+                            {/* progress bar */}
+                            <div className="mb-3">
+                              <div className="flex items-center justify-between text-xs text-muted-foreground mb-1">
+                                <span>{lang === "ar" ? "التقدم" : "Progress"}</span>
+                                <span className="font-medium text-primary">{enroll.progress ?? 0}%</span>
+                              </div>
+                              <div className="h-1.5 bg-muted rounded-full overflow-hidden">
+                                <div className="h-full bg-primary rounded-full transition-all"
+                                  style={{ width: `${enroll.progress ?? 0}%` }} />
+                              </div>
+                            </div>
+                            <Button className="w-full gap-2 h-9 text-sm"
+                              onClick={() => { setSelectedCourseId(enroll.courseId); setActiveTab("lessons"); }}
+                              disabled={!isEnrollActive}>
+                              <PlayCircle className="w-4 h-4" />
+                              {isEnrollActive ? (lang === "ar" ? "ابدأ التعلم" : "Start Learning") : (lang === "ar" ? "في انتظار التفعيل" : "Awaiting Activation")}
+                            </Button>
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
-                )}
-
-                {!course && !courseLoading && (
+                ) : courseLoading ? (
+                  <div className="h-32 bg-muted animate-pulse rounded-2xl" />
+                ) : (
                   <div className="bg-card border border-dashed border-border rounded-2xl p-10 text-center">
                     <GraduationCap className="w-12 h-12 text-muted-foreground/30 mx-auto mb-3" />
                     <p className="font-medium text-sm">{lang === "ar" ? "لم تسجّل في أي كورس بعد" : "Not enrolled in any course yet"}</p>
@@ -607,6 +828,31 @@ export default function StudentPortal() {
             {/* ─── LESSONS ─── */}
             {activeTab === "lessons" && (
               <motion.div key="lessons" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }} className="space-y-4">
+
+                {/* ── Course Selector (لو أكتر من كورس) ── */}
+                {enrollments && enrollments.length > 1 && (
+                  <div className="flex gap-2 flex-wrap">
+                    {enrollments.map((enroll: any) => {
+                      const ct = lang === "ar"
+                        ? (enroll.courseTitleAr || enroll.courseTitle)
+                        : enroll.courseTitle;
+                      const isSelected = activeCourseId === enroll.courseId;
+                      return (
+                        <button key={enroll.courseId}
+                          onClick={() => { setSelectedCourseId(enroll.courseId); setActiveVideo(null); setOpenModules({}); }}
+                          className={cn(
+                            "px-4 py-2 rounded-xl text-xs font-semibold border transition-all",
+                            isSelected
+                              ? "bg-primary text-primary-foreground border-primary"
+                              : "bg-card text-muted-foreground border-border hover:border-primary/50 hover:text-foreground"
+                          )}>
+                          {ct}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+
                 {!course && !courseLoading && (
                   <div className="bg-card border border-dashed border-border rounded-2xl p-10 text-center">
                     <BookOpen className="w-12 h-12 text-muted-foreground/30 mx-auto mb-3" />
@@ -882,7 +1128,7 @@ export default function StudentPortal() {
             {/* ─── MESSAGES ─── */}
             {activeTab === "messages" && (
               <motion.div key="messages" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }}>
-                <MessagesTab studentId={user.id} studentName={user.name} lang={lang} />
+                <MessagesTab studentId={user.id} studentName={user.name} courseId={user.courseId} lang={lang} />
               </motion.div>
             )}
           </AnimatePresence>
