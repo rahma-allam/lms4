@@ -1,0 +1,555 @@
+import { useLocation, useSearch } from "wouter";
+import { useI18n } from "@/lib/i18n";
+import { useAuth } from "@/lib/auth";
+import { usePixelTracking } from "@/hooks/use-pixel-tracking";
+import { motion, AnimatePresence } from "framer-motion";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { useState, useRef, useEffect } from "react";
+import {
+  Smartphone, Building2, Zap, CreditCard,
+  ChevronLeft, CheckCircle2, Lock, Users, BookOpen, Upload, X, Loader2, AlertCircle, ExternalLink
+} from "lucide-react";
+import { cn } from "@/lib/utils";
+import Navbar from "@/components/Navbar";
+import { useQuery } from "@tanstack/react-query";
+
+const MANUAL_METHODS = [
+  { id: "vodafone_cash", label: "Vodafone Cash",   labelAr: "فودافون كاش", color: "bg-red-600",      method: "cash"          as const },
+  { id: "instapay",     label: "InstaPay",         labelAr: "إنستاباي",   color: "bg-blue-600",     method: "bank_transfer" as const },
+  { id: "bank",         label: "Bank Transfer",    labelAr: "تحويل بنكي",  color: "bg-emerald-600",  method: "bank_transfer" as const },
+];
+
+export default function CheckoutPage() {
+  const { t, lang } = useI18n();
+  const { user, isLoading: authLoading } = useAuth();
+  const { trackPurchase } = usePixelTracking();
+  const [, navigate] = useLocation();
+  const search = useSearch();
+  const courseId = new URLSearchParams(search).get("courseId");
+
+  const [selectedMethod, setSelectedMethod] = useState("vodafone_cash");
+  const [step, setStep]                     = useState<"details" | "confirm" | "success" | "paymob">("details");
+  const [receiptFile, setReceiptFile]       = useState<File | null>(null);
+  const [previewUrl, setPreviewUrl]         = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting]     = useState(false);
+  const [error, setError]                   = useState<string | null>(null);
+  const [paymobIframeUrl, setPaymobIframeUrl] = useState<string | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Fetch storefront settings to know if Paymob is enabled
+  const { data: sfSettings } = useQuery<any>({
+    queryKey: ["/api/storefront/settings"],
+    queryFn: () => {
+      const tenant = localStorage.getItem("tenant_slug");
+      return fetch(`/api/storefront/settings${tenant ? `?tenant=${tenant}` : ""}`).then((r) => r.json());
+    },
+    staleTime: 60_000,
+  });
+  const paymobEnabled = sfSettings?.paymobEnabled === "true";
+
+  // Build dynamic payment methods list
+  const PAYMENT_METHODS = [
+    ...(paymobEnabled
+      ? [{ id: "paymob", label: "Credit / Debit Card", labelAr: "بطاقة ائتمان / خصم", color: "bg-violet-600", method: "online" as const }]
+      : []),
+    ...MANUAL_METHODS,
+  ];
+
+  const [couponInput, setCouponInput]       = useState("");
+  const [couponLoading, setCouponLoading]   = useState(false);
+  const [couponData, setCouponData]         = useState<{ code: string; discountAmount: number; discountType: string } | null>(null);
+  const [couponError, setCouponError]       = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!authLoading && !user) {
+      const tenant = localStorage.getItem("tenant_slug");
+      sessionStorage.setItem("redirect_after_login", `/checkout?courseId=${courseId}${tenant ? `&tenant=${tenant}` : ""}`);
+      navigate(`/login${tenant ? `?tenant=${tenant}` : ""}`);
+    }
+  }, [authLoading, user, courseId, navigate]);
+
+  const { data: course, isLoading: courseLoading } = useQuery({
+    queryKey: ["/api/storefront/course", courseId],
+    queryFn: async () => {
+      const tenant = localStorage.getItem("tenant_slug");
+      const res = await fetch(`/api/storefront/courses/${courseId}${tenant ? `?tenant=${tenant}` : ""}`);
+      if (!res.ok) throw new Error("Course not found");
+      return res.json();
+    },
+    enabled: !!courseId && !!user,
+  });
+
+  const courseTitle = lang === "en"
+    ? (course?.title ?? "")
+    : (course?.titleAr || course?.title || "");
+
+  const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) { setReceiptFile(file); setPreviewUrl(URL.createObjectURL(file)); }
+  };
+
+  const removeFile = () => {
+    setReceiptFile(null);
+    setPreviewUrl(null);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  };
+
+  const handleApplyCoupon = async () => {
+    if (!couponInput.trim()) return;
+    setCouponLoading(true);
+    setCouponError(null);
+    try {
+      const tenant = localStorage.getItem("tenant_slug");
+      const res = await fetch(`/api/coupons/validate${tenant ? `?tenant=${tenant}` : ""}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: couponInput.trim(), courseId: courseId ? parseInt(courseId) : undefined }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setCouponError(data.error || (lang === "ar" ? "كود غير صالح" : "Invalid coupon"));
+        setCouponData(null);
+      } else if (!data.valid) {
+        setCouponError(data.reason || (lang === "ar" ? "كوبون غير صالح" : "Coupon not valid"));
+        setCouponData(null);
+      } else {
+        // API returns: { valid, discountType, discountValue, finalAmount }
+        setCouponData({ code: couponInput.trim().toUpperCase(), discountAmount: data.discountValue, discountType: data.discountType });
+        setCouponError(null);
+      }
+    } catch {
+      setCouponError(lang === "ar" ? "خطأ في التحقق من الكوبون" : "Coupon validation failed");
+    } finally {
+      setCouponLoading(false);
+    }
+  };
+
+  const originalPrice = Number(course?.price ?? 0);
+  const discountAmount = couponData
+    ? couponData.discountType === "percent"
+      ? (originalPrice * couponData.discountAmount) / 100
+      : couponData.discountAmount
+    : 0;
+  const finalPrice = Math.max(0, originalPrice - discountAmount);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setError(null);
+
+    // Paymob flow — no receipt needed
+    if (selectedMethod === "paymob") {
+      setIsSubmitting(true);
+      try {
+        const token = localStorage.getItem("auth_token");
+        const tenant = localStorage.getItem("tenant_slug");
+        const res = await fetch(`/api/paymob/intention${tenant ? `?tenant=${tenant}` : ""}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ courseId: courseId ? parseInt(courseId) : undefined }),
+        });
+        const data = await res.json();
+        if (!res.ok) {
+          setError(data.error || (lang === "ar" ? "فشل فتح بوابة الدفع" : "Payment gateway error"));
+        } else {
+          setPaymobIframeUrl(data.iframeUrl);
+          setStep("paymob");
+        }
+      } catch {
+        setError(lang === "ar" ? "تعذر الاتصال ببوابة الدفع" : "Could not reach payment gateway");
+      } finally {
+        setIsSubmitting(false);
+      }
+      return;
+    }
+
+    // Manual methods — require receipt
+    if (!receiptFile) {
+      setError(lang === "ar" ? "يرجى رفع صورة الإيصال أولاً" : "Please upload the receipt first");
+      return;
+    }
+    setStep("confirm");
+  };
+
+  const handleConfirm = async () => {
+    if (!user) { navigate("/login"); return; }
+    setIsSubmitting(true);
+    setError(null);
+
+    const token = localStorage.getItem("auth_token");
+    const tenant = localStorage.getItem("tenant_slug");
+    const tenantQ = tenant ? `?tenant=${tenant}` : "";
+
+    // رفع الإيصال
+    let receiptUrl: string | null = null;
+    if (receiptFile) {
+      const formData = new FormData();
+      formData.append("receipt", receiptFile);
+      const uploadRes = await fetch(`/api/payments/upload-receipt${tenantQ}`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData,
+      });
+      if (uploadRes.ok) {
+        receiptUrl = (await uploadRes.json()).receiptUrl;
+      } else {
+        const err = await uploadRes.json().catch(() => ({}));
+        setError(err.error || (lang === "ar" ? "فشل رفع الإيصال" : "Failed to upload receipt"));
+        setIsSubmitting(false);
+        return;
+      }
+    }
+
+    // إرسال الدفع
+    const methodObj = PAYMENT_METHODS.find((m) => m.id === selectedMethod);
+    const res = await fetch(`/api/payments${tenantQ}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+      body: JSON.stringify({
+        studentId:  user.id,
+        courseId:   courseId ? parseInt(courseId) : undefined,
+        amount:     finalPrice,
+        status:     "pending",
+        method:     methodObj?.method ?? "cash",
+        receiptUrl: receiptUrl ?? undefined,
+        couponCode: couponData?.code ?? undefined,
+        paidAt:     new Date().toISOString(),
+      }),
+    });
+
+    if (res.ok) {
+      trackPurchase(finalPrice, "USD");
+      setStep("success");
+    } else {
+      const err = await res.json().catch(() => ({}));
+      setError(err.error || (lang === "ar" ? "حدث خطأ أثناء إرسال الطلب" : "Something went wrong"));
+    }
+    setIsSubmitting(false);
+  };
+
+  if (authLoading) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <Loader2 className="w-8 h-8 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+
+  if (!user) return null;
+
+  return (
+    <div className="min-h-screen bg-background">
+      <Navbar />
+      <div className="pt-24 pb-16 px-4">
+        <div className="max-w-5xl mx-auto">
+
+          {step === "paymob" && paymobIframeUrl ? (
+            <motion.div className="max-w-2xl mx-auto" initial={{ opacity: 0 }} animate={{ opacity: 1 }}>
+              <div className="flex items-center gap-3 mb-4">
+                <button onClick={() => setStep("details")} className="text-muted-foreground hover:text-foreground">
+                  <ChevronLeft className="w-5 h-5" />
+                </button>
+                <h2 className="text-lg font-bold flex items-center gap-2">
+                  <CreditCard className="w-4 h-4 text-primary" />
+                  {lang === "ar" ? "أدخل بيانات البطاقة" : "Enter Card Details"}
+                </h2>
+              </div>
+              <div className="bg-card border border-border rounded-2xl overflow-hidden shadow-lg">
+                <iframe
+                  src={paymobIframeUrl}
+                  title="Paymob Checkout"
+                  className="w-full"
+                  style={{ height: "600px", border: "none" }}
+                />
+              </div>
+              <p className="text-center text-xs text-muted-foreground mt-3 flex items-center justify-center gap-1">
+                <Lock className="w-3 h-3" />
+                {lang === "ar" ? "مدعوم من Paymob — دفع آمن ومشفر" : "Powered by Paymob — Secure & Encrypted"}
+              </p>
+              <div className="text-center mt-2">
+                <a href={paymobIframeUrl} target="_blank" rel="noreferrer"
+                  className="text-xs text-primary hover:underline inline-flex items-center gap-1">
+                  <ExternalLink className="w-3 h-3" />
+                  {lang === "ar" ? "فتح في نافذة جديدة" : "Open in new window"}
+                </a>
+              </div>
+            </motion.div>
+          ) : step === "success" ? (
+            <motion.div className="text-center py-20 max-w-lg mx-auto" initial={{ opacity: 0, scale: 0.9 }} animate={{ opacity: 1, scale: 1 }}>
+              <div className="w-20 h-20 rounded-full bg-emerald-500/10 flex items-center justify-center mx-auto mb-6">
+                <CheckCircle2 className="w-10 h-10 text-emerald-500" />
+              </div>
+              <h1 className="text-3xl font-bold mb-3">{t("checkout.success.title")}</h1>
+              <p className="text-muted-foreground mb-2">{t("checkout.success.subtitle")}</p>
+              <p className="text-sm text-muted-foreground mb-8">
+                {lang === "ar"
+                  ? "جاري مراجعة طلبك، سيتم تفعيل الكورس فور التأكد من التحويل."
+                  : "Your request is being reviewed. Course will be activated once payment is verified."}
+              </p>
+              <div className="flex flex-col sm:flex-row gap-3 justify-center">
+                <Button onClick={() => { const tenant = localStorage.getItem("tenant_slug"); navigate(`/portal${tenant ? `?tenant=${tenant}` : ""}`); }}>
+                  {t("checkout.success.go")}
+                </Button>
+                <Button variant="outline" onClick={() => { const tenant = localStorage.getItem("tenant_slug"); navigate(`/${tenant ? `?tenant=${tenant}` : ""}`); }}>
+                  {t("checkout.success.back")}
+                </Button>
+              </div>
+            </motion.div>
+
+          ) : (
+            <div className="grid grid-cols-1 lg:grid-cols-5 gap-8">
+              <div className="lg:col-span-3 space-y-6">
+
+                <div className="flex items-center gap-3">
+                  <button onClick={() => step === "confirm" ? setStep("details") : navigate("/")} className="text-muted-foreground hover:text-foreground transition-colors">
+                    <ChevronLeft className={cn("w-5 h-5", lang === "ar" && "rotate-180")} />
+                  </button>
+                  <h1 className="text-2xl font-bold">
+                    {step === "confirm" ? t("checkout.confirm.title") : t("checkout.title")}
+                  </h1>
+                </div>
+
+                {error && (
+                  <div className="flex items-center gap-2 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-400 rounded-xl px-4 py-3 text-sm">
+                    <AlertCircle className="w-4 h-4 shrink-0" />
+                    {error}
+                  </div>
+                )}
+
+                {step === "details" && (
+                  <motion.form onSubmit={handleSubmit} className="space-y-6" initial={{ opacity: 0, x: -20 }} animate={{ opacity: 1, x: 0 }}>
+                    <div className="bg-card border border-border rounded-2xl p-6 space-y-4">
+                      <h2 className="font-semibold text-sm text-muted-foreground uppercase tracking-wider">{t("checkout.personal")}</h2>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                        <div className="space-y-1.5">
+                          <Label>{t("checkout.name")}</Label>
+                          <Input value={user.name} readOnly className="bg-muted/40 cursor-not-allowed" />
+                        </div>
+                        <div className="space-y-1.5">
+                          <Label>{t("checkout.phone")}</Label>
+                          <Input value={user.phone ?? ""} readOnly className="bg-muted/40 cursor-not-allowed" />
+                        </div>
+                      </div>
+                      <div className="space-y-1.5">
+                        <Label>{t("checkout.email")}</Label>
+                        <Input value={user.email} readOnly className="bg-muted/40 cursor-not-allowed" />
+                      </div>
+                    </div>
+
+                    <div className="bg-card border border-border rounded-2xl p-6 space-y-3">
+                      <h2 className="font-semibold text-sm text-muted-foreground uppercase tracking-wider">
+                        {lang === "ar" ? "كوبون الخصم" : "Discount Coupon"}
+                      </h2>
+                      <div className="flex gap-2">
+                        <Input
+                          value={couponInput}
+                          onChange={(e) => setCouponInput(e.target.value.toUpperCase())}
+                          placeholder={lang === "ar" ? "أدخل كود الكوبون" : "Enter coupon code"}
+                          className="flex-1 font-mono uppercase"
+                          disabled={!!couponData}
+                          onKeyDown={(e) => e.key === "Enter" && (e.preventDefault(), handleApplyCoupon())}
+                        />
+                        {couponData ? (
+                          <Button type="button" variant="outline" size="sm" onClick={() => { setCouponData(null); setCouponInput(""); }}>✕</Button>
+                        ) : (
+                          <Button type="button" size="sm" onClick={handleApplyCoupon} disabled={couponLoading || !couponInput.trim()}>
+                            {couponLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : (lang === "ar" ? "تطبيق" : "Apply")}
+                          </Button>
+                        )}
+                      </div>
+                      {couponError && <p className="text-xs text-destructive">{couponError}</p>}
+                      {couponData && (
+                        <p className="text-xs text-emerald-600 dark:text-emerald-400 font-medium">
+                          ✓ {lang === "ar"
+                            ? `تم تطبيق خصم ${couponData.discountType === "percent" ? `${couponData.discountAmount}%` : `$${couponData.discountAmount}`}`
+                            : `Coupon applied — ${couponData.discountType === "percent" ? `${couponData.discountAmount}% off` : `$${couponData.discountAmount} off`}`}
+                        </p>
+                      )}
+                    </div>
+
+                    <div className="bg-card border border-border rounded-2xl p-6 space-y-4">
+                      <h2 className="font-semibold text-sm text-muted-foreground uppercase tracking-wider">{t("checkout.payment")}</h2>
+                      <div className="grid grid-cols-2 gap-3">
+                        {PAYMENT_METHODS.map((m) => (
+                          <button key={m.id} type="button" onClick={() => setSelectedMethod(m.id)}
+                            className={cn(
+                              "relative flex flex-col items-center gap-2 p-4 rounded-xl border-2 transition-all text-sm font-medium",
+                              selectedMethod === m.id ? "border-primary bg-primary/5" : "border-border hover:border-muted-foreground/30"
+                            )}>
+                            <div className={cn("w-8 h-8 rounded-lg flex items-center justify-center text-white shrink-0", m.color)}>
+                              {m.id === "paymob"       && <CreditCard className="w-4 h-4" />}
+                              {m.id === "vodafone_cash" && <Smartphone className="w-4 h-4" />}
+                              {m.id === "instapay" && <Zap className="w-4 h-4" />}
+                              {m.id === "bank" && <Building2 className="w-4 h-4" />}
+                            </div>
+                            <span className="text-center leading-tight">{lang === "ar" ? m.labelAr : m.label}</span>
+                            {selectedMethod === m.id && (
+                              <div className="absolute top-2 ltr:right-2 rtl:left-2 w-4 h-4 rounded-full bg-primary flex items-center justify-center">
+                                <CheckCircle2 className="w-3 h-3 text-white" />
+                              </div>
+                            )}
+                          </button>
+                        ))}
+                      </div>
+
+                      <AnimatePresence mode="wait">
+                        <motion.div key={selectedMethod} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="space-y-4 pt-2">
+                          <div className={cn(
+                            "rounded-xl p-4 text-sm border",
+                            selectedMethod === "vodafone_cash" && "bg-red-50 border-red-200 text-red-800 dark:bg-red-950/20 dark:border-red-900 dark:text-red-300",
+                            selectedMethod === "instapay" && "bg-blue-50 border-blue-200 text-blue-800 dark:bg-blue-950/20 dark:border-blue-900 dark:text-blue-300",
+                            selectedMethod === "bank" && "bg-emerald-50 border-emerald-200 text-emerald-800 dark:bg-emerald-950/20 dark:border-emerald-900 dark:text-emerald-300"
+                          )}>
+                            <p className="font-bold mb-1">
+                              {selectedMethod === "vodafone_cash" ? t("checkout.vodafone.title")
+                                : selectedMethod === "instapay" ? (lang === "ar" ? "إنستاباي" : "InstaPay")
+                                : t("checkout.bank.title")}
+                            </p>
+                            <p className="opacity-90">
+                              {selectedMethod === "vodafone_cash"
+                                ? t("checkout.vodafone.desc")
+                                : selectedMethod === "instapay"
+                                ? (lang === "ar"
+                                    ? "ارسل المبلغ عبر تطبيق إنستاباي ثم ارفع صورة الإيصال"
+                                    : "Send the amount via InstaPay then upload a screenshot")
+                                : <>{t("checkout.bank.account")}: 1234-5678-9012<br />{t("checkout.bank.name")}: EduAcademy Pro</>}
+                            </p>
+                          </div>
+
+                          <div className={cn("space-y-3 p-4 border-2 border-dashed border-muted rounded-2xl bg-muted/20", selectedMethod === "paymob" && "hidden")}>
+                            <Label className="flex items-center gap-2">
+                              <Upload className="w-4 h-4" />
+                              {lang === "ar" ? "ارفع صورة إيصال التحويل" : "Upload transaction receipt"}
+                            </Label>
+                            {!previewUrl ? (
+                              <div onClick={() => fileInputRef.current?.click()}
+                                className="h-32 flex flex-col items-center justify-center gap-2 cursor-pointer hover:bg-muted/40 transition-colors rounded-xl border border-border bg-background">
+                                <Upload className="w-8 h-8 text-muted-foreground" />
+                                <span className="text-xs text-muted-foreground italic">
+                                  {lang === "ar" ? "اضغط لاختيار صورة" : "Click to select an image"}
+                                </span>
+                                <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handleFileChange} />
+                              </div>
+                            ) : (
+                              <div className="relative group">
+                                <img src={previewUrl} alt="Receipt" className="w-full h-40 object-contain rounded-xl border bg-black" />
+                                <button type="button" onClick={removeFile}
+                                  className="absolute top-2 right-2 p-1 bg-red-500 text-white rounded-full shadow-lg hover:bg-red-600 transition-colors">
+                                  <X className="w-4 h-4" />
+                                </button>
+                              </div>
+                            )}
+                          </div>
+                        </motion.div>
+                      </AnimatePresence>
+                    </div>
+
+                    <Button type="submit" size="lg" className="w-full gap-2" disabled={selectedMethod !== "paymob" && !receiptFile || isSubmitting}>
+                      {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Lock className="w-4 h-4" />}
+                      {selectedMethod === "paymob"
+                        ? (lang === "ar" ? "ادفع بالبطاقة عبر Paymob" : "Pay with Card via Paymob")
+                        : t("checkout.proceed")}
+                    </Button>
+                  </motion.form>
+                )}
+
+                {step === "confirm" && (
+                  <motion.div className="space-y-6" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }}>
+                    <div className="bg-card border border-border rounded-2xl p-6 space-y-4">
+                      <h2 className="font-semibold">{t("checkout.summary")}</h2>
+                      <div className="flex items-start gap-4 pb-4 border-b border-border">
+                        <div className="w-12 h-12 rounded-xl bg-primary/10 flex items-center justify-center shrink-0">
+                          <BookOpen className="w-6 h-6 text-primary" />
+                        </div>
+                        <div className="flex-1 min-w-0">
+                          <p className="font-semibold truncate">{courseTitle}</p>
+                          <p className="text-sm text-muted-foreground">
+                            {course?.courseType === "live" ? t("courses.live") : t("courses.recorded")}
+                          </p>
+                        </div>
+                        <p className="font-bold text-xl text-primary shrink-0">
+                          {courseLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : `$${course?.price ?? "—"}`}
+                        </p>
+                      </div>
+                      <div className="flex justify-between text-sm text-muted-foreground">
+                        <span>{t("checkout.name")}</span>
+                        <span className="font-medium text-foreground">{user.name}</span>
+                      </div>
+                      <div className="flex justify-between text-sm text-muted-foreground">
+                        <span>{t("checkout.email")}</span>
+                        <span className="font-medium text-foreground">{user.email}</span>
+                      </div>
+                      <div className="flex justify-between text-sm text-muted-foreground">
+                        <span>{t("checkout.method")}</span>
+                        <span className="font-medium text-foreground capitalize">
+                          {PAYMENT_METHODS.find((m) => m.id === selectedMethod)?.[lang === "ar" ? "labelAr" : "label"]}
+                        </span>
+                      </div>
+                      {previewUrl && (
+                        <div className="pt-2">
+                          <p className="text-xs text-muted-foreground mb-2">{lang === "ar" ? "الإيصال المرفق" : "Attached Receipt"}</p>
+                          <img src={previewUrl} alt="Receipt preview" className="w-full max-h-40 object-contain rounded-xl border bg-black" />
+                        </div>
+                      )}
+                      {couponData && discountAmount > 0 && (
+                        <div className="flex justify-between text-sm text-emerald-600 dark:text-emerald-400">
+                          <span>{lang === "ar" ? "خصم الكوبون" : "Coupon discount"}</span>
+                          <span>-${discountAmount.toFixed(2)}</span>
+                        </div>
+                      )}
+                      <div className="flex justify-between font-bold text-lg pt-2 border-t border-border">
+                        <span>{t("checkout.total")}</span>
+                        <span className="text-primary">
+                          {courseLoading ? <Loader2 className="w-5 h-5 animate-spin" /> : `$${finalPrice.toFixed(2)}`}
+                        </span>
+                      </div>
+                    </div>
+
+                    <Button size="lg" className="w-full gap-2" onClick={handleConfirm} disabled={isSubmitting || courseLoading}>
+                      {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <CheckCircle2 className="w-4 h-4" />}
+                      {isSubmitting
+                        ? (lang === "ar" ? "جاري الإرسال..." : "Submitting...")
+                        : `${t("checkout.pay")} $${finalPrice.toFixed(2)}`}
+                    </Button>
+                  </motion.div>
+                )}
+              </div>
+
+              <div className="lg:col-span-2">
+                <div className="sticky top-28 space-y-4">
+                  {course ? (
+                    <div className="bg-card border border-border rounded-2xl overflow-hidden">
+                      <div className="h-36 bg-primary/10 flex items-center justify-center">
+                        {course.thumbnailUrl
+                          ? <img src={course.thumbnailUrl} alt={courseTitle} className="w-full h-full object-cover" />
+                          : <BookOpen className="w-12 h-12 text-primary/40" />}
+                      </div>
+                      <div className="p-5 space-y-3">
+                        <h3 className="font-bold text-lg leading-tight">{courseTitle}</h3>
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-2 text-sm text-muted-foreground">
+                            <Users className="w-4 h-4" />
+                            <span>{course.studentCount} {t("courses.students")}</span>
+                          </div>
+                          <span className="text-2xl font-bold text-primary">${course.price}</span>
+                        </div>
+                      </div>
+                    </div>
+                  ) : courseLoading ? (
+                    <div className="bg-card border border-border rounded-2xl p-8 flex justify-center">
+                      <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
