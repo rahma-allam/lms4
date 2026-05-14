@@ -1,6 +1,9 @@
 import { Request, Response, NextFunction } from "express";
 import { verifyAdminToken } from "../routes/admin-auth.js";
 import { verifyInstructorToken } from "../routes/instructor-auth.js";
+import jwt from "jsonwebtoken";
+
+const JWT_SECRET = process.env.SESSION_SECRET || "lms-secret-key";
 
 export function requireAdmin(req: Request, res: Response, next: NextFunction) {
   try {
@@ -18,9 +21,16 @@ export function requireAdmin(req: Request, res: Response, next: NextFunction) {
 
 // middleware للطالب — بيتحقق من student token أو يسمح بالمرور لو مفيش token (public routes)
 export function allowStudent(req: Request, res: Response, next: NextFunction) {
-  // لو الـ route محتاج student token في المستقبل — نضيفه هنا
-  // دلوقتي: نسمح بالمرور بشرط إن الـ tenantId موجود من الـ tenantMiddleware
-  next();
+  try {
+    const auth = req.headers["authorization"];
+    if (!auth?.startsWith("Bearer "))
+      return res.status(401).json({ error: "Unauthorized" });
+    const payload = jwt.verify(auth.slice(7), JWT_SECRET) as { id: number; email: string };
+    (req as any).student = { id: payload.id, email: payload.email };
+    next();
+  } catch {
+    res.status(401).json({ error: "Invalid or expired token" });
+  }
 }
 
 export function requireInstructor(req: Request, res: Response, next: NextFunction) {

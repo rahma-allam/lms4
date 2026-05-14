@@ -1,11 +1,11 @@
 import { useParams, useLocation } from "wouter";
 import { useI18n } from "@/lib/i18n";
-import { useGetCourse, getGetCourseQueryKey } from "@workspace/api-client-react";
+import { useQuery } from "@tanstack/react-query";
 import { motion } from "framer-motion";
 import { Button } from "@/components/ui/button";
 import {
   ChevronLeft, PlayCircle, FileText, Lock, Users, Clock,
-  Radio, Calendar, Video, ExternalLink, ShoppingCart,
+  Radio, Calendar, Video, ShoppingCart,
   ChevronDown, ChevronRight
 } from "lucide-react";
 import { useState, useEffect } from "react";
@@ -93,16 +93,6 @@ function SessionCard({ session, lang, t }: { session: any; lang: string; t: (k: 
         )}
       </div>
 
-      {session.zoomLink && !isPast && (
-        <Button
-          size="sm"
-          className="gap-2 shrink-0 bg-[#2D8CFF] hover:bg-[#1a7ae0] text-white"
-          onClick={() => window.open(session.zoomLink, "_blank")}
-        >
-          <ExternalLink className="w-4 h-4" />
-          {t("session.join")}
-        </Button>
-      )}
     </motion.div>
   );
 }
@@ -113,14 +103,17 @@ export default function CoursePage() {
   const [, navigate] = useLocation();
   const { trackPurchase: _trackPurchase, trackViewContent, trackInitiateCheckout } = usePixelTracking();
   const [openModules, setOpenModules] = useState<Record<number, boolean>>({});
-  const [activeVideo, setActiveVideo] = useState<{ url: string; title: string } | null>(null);
-  const [videoLoading, setVideoLoading] = useState(false);
 
-  const { data: course, isLoading } = useGetCourse(parseInt(id || "0"), {
-    query: {
-      queryKey: getGetCourseQueryKey(parseInt(id || "0")),
-      enabled: !!id,
+  const { data: course, isLoading } = useQuery<any>({
+    queryKey: ["/api/storefront/courses", id],
+    queryFn: async () => {
+      const tenant = localStorage.getItem("tenant_slug");
+      const sep = tenant ? `?tenant=${tenant}` : "";
+      const res = await fetch(`/api/storefront/courses/${id}${sep}`);
+      if (!res.ok) throw new Error("Failed to fetch course");
+      return res.json();
     },
+    enabled: !!id,
   });
 
   useEffect(() => {
@@ -283,28 +276,6 @@ export default function CoursePage() {
                 <h2 className="text-xl font-bold">{t("course.curriculum")}</h2>
               </div>
 
-              {videoLoading && (
-                <div className="bg-black rounded-2xl aspect-video mb-6 flex items-center justify-center">
-                  <div className="w-10 h-10 border-4 border-white/20 border-t-white rounded-full animate-spin" />
-                </div>
-              )}
-
-              {!videoLoading && activeVideo && (
-                <motion.div
-                  className="bg-black rounded-2xl overflow-hidden aspect-video mb-6"
-                  initial={{ opacity: 0, scale: 0.97 }}
-                  animate={{ opacity: 1, scale: 1 }}
-                >
-                  <video
-                    key={activeVideo.url}
-                    src={activeVideo.url}
-                    controls
-                    autoPlay
-                    className="w-full h-full"
-                  />
-                </motion.div>
-              )}
-
               {course.modules?.length === 0 ? (
                 <div className="text-center py-16 text-muted-foreground border border-dashed border-border rounded-2xl">
                   <BookOpen className="w-10 h-10 mx-auto mb-3 opacity-30" />
@@ -346,27 +317,10 @@ export default function CoursePage() {
                         <div className="border-t border-border divide-y divide-border">
                           {module.lessons.map((lesson: any, lessonIdx: number) => {
                             const lessonTitle = lang === "ar" ? (lesson.titleAr || lesson.title) : lesson.title;
-                            const isClickable = lesson.type === "video" && lesson.videoUrl;
                             return (
                               <div
                                 key={lesson.id}
-                                onClick={async () => {
-                                if (!isClickable) return;
-                                setVideoLoading(true);
-                                try {
-                                  const res = await fetch(`/api/lessons/${lesson.id}/signed-url`, { method: "POST" });
-                                  if (res.ok) {
-                                    const { url: streamUrl } = await res.json();
-                                    setActiveVideo({ url: streamUrl, title: lessonTitle });
-                                  }
-                                } finally {
-                                  setVideoLoading(false);
-                                }
-                              }}
-                                className={cn(
-                                  "flex items-center gap-3 px-5 py-3.5 text-sm transition-colors",
-                                  isClickable ? "cursor-pointer hover:bg-accent/30" : "opacity-70"
-                                )}
+                                className="flex items-center gap-3 px-5 py-3.5 text-sm opacity-80"
                               >
                                 <span className="text-muted-foreground w-5 shrink-0 text-xs">
                                   {lessonIdx + 1}.
@@ -378,9 +332,7 @@ export default function CoursePage() {
                                     {formatDuration(lesson.duration)}
                                   </span>
                                 )}
-                                {!isClickable && (
-                                  <Lock className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
-                                )}
+                                <Lock className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
                               </div>
                             );
                           })}

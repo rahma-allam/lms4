@@ -580,8 +580,14 @@ export const UpdateSettingsBody = zod.object({
   googleApiSecret: zod.string().nullish(),
   tiktokPixelId: zod.string().nullish(),
   tiktokAccessToken: zod.string().nullish(),
-  defaultLanguage: zod.enum(["en", "ar"]),
-  currency: zod.string(),
+  defaultLanguage: zod.enum(["en", "ar"]).default("en"),
+  currency: zod.string().default("USD"),
+  paymobEnabled: zod.string().nullish(),
+  paymobApiKey: zod.string().nullish(),
+  paymobIntegrationId: zod.string().nullish(),
+  paymobIframeId: zod.string().nullish(),
+  paymobHmacSecret: zod.string().nullish(),
+  manualPaymentInstructions: zod.string().nullish(),
 });
 
 export const UpdateSettingsResponse = zod.object({
@@ -598,6 +604,7 @@ export const UpdateSettingsResponse = zod.object({
   defaultLanguage: zod.enum(["en", "ar"]),
   currency: zod.string(),
   manualPaymentInstructions: zod.string().nullish(),
+  paymobEnabled: zod.string().nullish(),
 });
 
 /**

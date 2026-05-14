@@ -8,7 +8,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useState, useRef, useEffect } from "react";
 import {
-  Smartphone, Building2, Zap, CreditCard,
+  Building2, CreditCard,
   ChevronLeft, CheckCircle2, Lock, Users, BookOpen, Upload, X, Loader2, AlertCircle, ExternalLink
 } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -16,9 +16,7 @@ import Navbar from "@/components/Navbar";
 import { useQuery } from "@tanstack/react-query";
 
 const MANUAL_METHODS = [
-  { id: "vodafone_cash", label: "Vodafone Cash",   labelAr: "فودافون كاش", color: "bg-red-600",      method: "cash"          as const },
-  { id: "instapay",     label: "InstaPay",         labelAr: "إنستاباي",   color: "bg-blue-600",     method: "bank_transfer" as const },
-  { id: "bank",         label: "Bank Transfer",    labelAr: "تحويل بنكي",  color: "bg-emerald-600",  method: "bank_transfer" as const },
+  { id: "manual", label: "Manual Payment", labelAr: "دفع يدوي", color: "bg-amber-500", method: "bank_transfer" as const },
 ];
 
 export default function CheckoutPage() {
@@ -29,7 +27,7 @@ export default function CheckoutPage() {
   const search = useSearch();
   const courseId = new URLSearchParams(search).get("courseId");
 
-  const [selectedMethod, setSelectedMethod] = useState("vodafone_cash");
+  const [selectedMethod, setSelectedMethod] = useState("manual");
   const [step, setStep]                     = useState<"details" | "confirm" | "success" | "paymob">("details");
   const [receiptFile, setReceiptFile]       = useState<File | null>(null);
   const [previewUrl, setPreviewUrl]         = useState<string | null>(null);
@@ -128,7 +126,7 @@ export default function CheckoutPage() {
 
   const originalPrice = Number(course?.price ?? 0);
   const discountAmount = couponData
-    ? couponData.discountType === "percent"
+    ? couponData.discountType === "percentage"
       ? (originalPrice * couponData.discountAmount) / 100
       : couponData.discountAmount
     : 0;
@@ -365,8 +363,8 @@ export default function CheckoutPage() {
                       {couponData && (
                         <p className="text-xs text-emerald-600 dark:text-emerald-400 font-medium">
                           ✓ {lang === "ar"
-                            ? `تم تطبيق خصم ${couponData.discountType === "percent" ? `${couponData.discountAmount}%` : `$${couponData.discountAmount}`}`
-                            : `Coupon applied — ${couponData.discountType === "percent" ? `${couponData.discountAmount}% off` : `$${couponData.discountAmount} off`}`}
+                            ? `تم تطبيق خصم ${couponData.discountType === "percentage" ? `${couponData.discountAmount}%` : `$${couponData.discountAmount}`}`
+                            : `Coupon applied — ${couponData.discountType === "percentage" ? `${couponData.discountAmount}% off` : `$${couponData.discountAmount} off`}`}
                         </p>
                       )}
                     </div>
@@ -381,10 +379,8 @@ export default function CheckoutPage() {
                               selectedMethod === m.id ? "border-primary bg-primary/5" : "border-border hover:border-muted-foreground/30"
                             )}>
                             <div className={cn("w-8 h-8 rounded-lg flex items-center justify-center text-white shrink-0", m.color)}>
-                              {m.id === "paymob"       && <CreditCard className="w-4 h-4" />}
-                              {m.id === "vodafone_cash" && <Smartphone className="w-4 h-4" />}
-                              {m.id === "instapay" && <Zap className="w-4 h-4" />}
-                              {m.id === "bank" && <Building2 className="w-4 h-4" />}
+                              {m.id === "paymob"  && <CreditCard className="w-4 h-4" />}
+                              {m.id === "manual"  && <Building2 className="w-4 h-4" />}
                             </div>
                             <span className="text-center leading-tight">{lang === "ar" ? m.labelAr : m.label}</span>
                             {selectedMethod === m.id && (
@@ -398,27 +394,11 @@ export default function CheckoutPage() {
 
                       <AnimatePresence mode="wait">
                         <motion.div key={selectedMethod} initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }} className="space-y-4 pt-2">
-                          <div className={cn(
-                            "rounded-xl p-4 text-sm border",
-                            selectedMethod === "vodafone_cash" && "bg-red-50 border-red-200 text-red-800 dark:bg-red-950/20 dark:border-red-900 dark:text-red-300",
-                            selectedMethod === "instapay" && "bg-blue-50 border-blue-200 text-blue-800 dark:bg-blue-950/20 dark:border-blue-900 dark:text-blue-300",
-                            selectedMethod === "bank" && "bg-emerald-50 border-emerald-200 text-emerald-800 dark:bg-emerald-950/20 dark:border-emerald-900 dark:text-emerald-300"
-                          )}>
-                            <p className="font-bold mb-1">
-                              {selectedMethod === "vodafone_cash" ? t("checkout.vodafone.title")
-                                : selectedMethod === "instapay" ? (lang === "ar" ? "إنستاباي" : "InstaPay")
-                                : t("checkout.bank.title")}
-                            </p>
-                            <p className="opacity-90">
-                              {selectedMethod === "vodafone_cash"
-                                ? t("checkout.vodafone.desc")
-                                : selectedMethod === "instapay"
-                                ? (lang === "ar"
-                                    ? "ارسل المبلغ عبر تطبيق إنستاباي ثم ارفع صورة الإيصال"
-                                    : "Send the amount via InstaPay then upload a screenshot")
-                                : <>{t("checkout.bank.account")}: 1234-5678-9012<br />{t("checkout.bank.name")}: EduAcademy Pro</>}
-                            </p>
-                          </div>
+                          {sfSettings?.manualPaymentInstructions && selectedMethod === "manual" && (
+                            <div className="rounded-xl p-4 text-sm border bg-amber-50 border-amber-200 text-amber-900 dark:bg-amber-950/20 dark:border-amber-900 dark:text-amber-200 whitespace-pre-line">
+                              {sfSettings.manualPaymentInstructions}
+                            </div>
+                          )}
 
                           <div className={cn("space-y-3 p-4 border-2 border-dashed border-muted rounded-2xl bg-muted/20", selectedMethod === "paymob" && "hidden")}>
                             <Label className="flex items-center gap-2">

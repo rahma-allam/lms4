@@ -601,6 +601,13 @@ export default function StudentPortal() {
     enabled: !!user?.id,
   });
 
+  // ✅ مدفوعات الطالب من endpoint مستقل محمي بـ JWT
+  const { data: payments = [], isLoading: paymentsLoading } = useQuery<any[]>({
+    queryKey: ["my-payments", user?.id],
+    queryFn: () => fetchWithStudentAuth(`/api/storefront/my-payments`),
+    enabled: !!user?.id,
+  });
+
   useEffect(() => {
     if (!authLoading && !user) {
       const tenant = localStorage.getItem("tenant_slug");
@@ -623,7 +630,7 @@ export default function StudentPortal() {
   const tabs: { key: Tab; label: string; icon: typeof User }[] = [
     { key: "overview",      label: lang === "ar" ? "نظرة عامة" : "Overview",     icon: User },
     { key: "lessons",       label: lang === "ar" ? "الدروس" : "Lessons",         icon: BookOpen },
-    { key: "my-courses",    label: lang === "ar" ? "كوراتي" : "My Courses",      icon: GraduationCap },
+    { key: "my-courses",    label: lang === "ar" ? "كورساتي" : "My Courses",      icon: GraduationCap },
     { key: "certificates",  label: lang === "ar" ? "شهاداتي" : "Certificates",   icon: Trophy },
     { key: "payments",      label: lang === "ar" ? "المدفوعات" : "Payments",     icon: CreditCard },
     { key: "messages",      label: lang === "ar" ? "الرسائل" : "Messages",       icon: MessageCircle },
@@ -632,8 +639,6 @@ export default function StudentPortal() {
   const courseTitle = lang === "ar"
     ? (course?.titleAr || course?.title || "")
     : (course?.title || "");
-
-  const payments = (student as any)?.payments ?? [];
 
   return (
     <div className="min-h-screen bg-background">
@@ -975,7 +980,7 @@ export default function StudentPortal() {
             {/* ─── PAYMENTS ─── */}
             {activeTab === "payments" && (
               <motion.div key="payments" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }}>
-                {studentLoading ? (
+                {paymentsLoading ? (
                   <div className="space-y-3">{[1, 2].map((i) => <div key={i} className="h-20 bg-muted animate-pulse rounded-2xl" />)}</div>
                 ) : payments.length === 0 ? (
                   <div className="bg-card border border-dashed border-border rounded-2xl p-10 text-center">

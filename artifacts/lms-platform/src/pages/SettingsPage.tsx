@@ -1,11 +1,6 @@
 import { useEffect, useState } from "react";
 import { useI18n } from "@/lib/i18n";
-import {
-  useGetSettings,
-  useUpdateSettings,
-  getGetSettingsQueryKey,
-} from "@workspace/api-client-react";
-import { useQueryClient } from "@tanstack/react-query";
+import { useQueryClient, useMutation, useQuery } from "@tanstack/react-query";
 import { useForm } from "react-hook-form";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -64,23 +59,31 @@ export default function SettingsPage() {
   const { t } = useI18n();
   const qc = useQueryClient();
 
-  const { data: settings, isLoading } = useGetSettings({
-    query: { queryKey: getGetSettingsQueryKey() },
+  const { data: settings, isLoading } = useQuery<Record<string, any>>({
+    queryKey: ["/api/settings"],
+    queryFn: () => fetchWithAuth("/api/settings").then((r) => r.json()),
   });
 
-  const updateSettings = useUpdateSettings({
-    mutation: {
-      onSuccess: () => {
-        qc.invalidateQueries({ queryKey: getGetSettingsQueryKey() });
-        // ✅ invalidate storefront cache عشان الـ Dashboard يتحدث
-        qc.invalidateQueries({ queryKey: ["/api/storefront/settings"] });
-        toast.success("Settings saved");
-      },
-      onError: () => toast.error("Failed to save settings"),
+  const updateSettings = useMutation({
+    mutationFn: (body: Record<string, any>) =>
+      fetchWithAuth("/api/settings", {
+        method: "PUT",
+        body: JSON.stringify(body),
+      }).then(async (r) => {
+        if (!r.ok) throw new Error((await r.json()).error || "Failed");
+        return r.json();
+      }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["/api/settings"] });
+      qc.invalidateQueries({ queryKey: ["/api/storefront/settings"] });
+      toast.success("Settings saved");
     },
+    onError: (e: any) => toast.error(e.message || "Failed to save settings"),
   });
 
-  const { register, handleSubmit, reset } = useForm<SettingsForm>();
+  const { register, handleSubmit, reset, setValue, watch, getValues } = useForm<SettingsForm>();
+  const [logoUploading, setLogoUploading] = useState(false);
+  const logoUrl = watch("logoUrl");
 
   useEffect(() => {
     if (settings) {
@@ -116,24 +119,24 @@ export default function SettingsPage() {
       <h1 className="text-xl font-bold">{t("settings")}</h1>
 
       <form
-        onSubmit={handleSubmit((data) =>
+        onSubmit={(e) => {
+          e.preventDefault();
+          const data = getValues();
           updateSettings.mutate({
-            data: {
-              academyName: data.academyName,
-              academyNameAr: data.academyNameAr || undefined,
-              logoUrl: data.logoUrl || undefined,
-              metaPixelId: data.metaPixelId || undefined,
-              metaConversionToken: data.metaConversionToken || undefined,
-              googleTagId: data.googleTagId || undefined,
-              googleApiSecret: data.googleApiSecret || undefined,
-              tiktokPixelId: data.tiktokPixelId || undefined,
-              tiktokAccessToken: data.tiktokAccessToken || undefined,
-              defaultLanguage: data.defaultLanguage,
-              currency: data.currency,
-              manualPaymentInstructions: data.manualPaymentInstructions || undefined,
-            },
-          })
-        )}
+            academyName: data.academyName || settings?.academyName || "",
+            academyNameAr: data.academyNameAr || settings?.academyNameAr || null,
+            logoUrl: data.logoUrl || settings?.logoUrl || null,
+            metaPixelId: data.metaPixelId || settings?.metaPixelId || null,
+            metaConversionToken: data.metaConversionToken || settings?.metaConversionToken || null,
+            googleTagId: data.googleTagId || settings?.googleTagId || null,
+            googleApiSecret: data.googleApiSecret || settings?.googleApiSecret || null,
+            tiktokPixelId: data.tiktokPixelId || settings?.tiktokPixelId || null,
+            tiktokAccessToken: data.tiktokAccessToken || settings?.tiktokAccessToken || null,
+            defaultLanguage: data.defaultLanguage || settings?.defaultLanguage || "en",
+            currency: data.currency || settings?.currency || "USD",
+            manualPaymentInstructions: data.manualPaymentInstructions || settings?.manualPaymentInstructions || null,
+          });
+        }}
         className="space-y-6"
       >
         {/* General Settings */}
@@ -156,7 +159,58 @@ export default function SettingsPage() {
 
           <div>
             <label className="text-sm font-medium">{t("logoUrl")}</label>
-            <Input {...register("logoUrl")} className="mt-1" placeholder="https://..." />
+            <div className="mt-1 flex items-center gap-3">
+              {/* Preview */}
+              <div className="w-12 h-12 rounded-lg border border-border bg-muted flex items-center justify-center shrink-0 overflow-hidden">
+                {logoUrl ? (
+                  <img src={logoUrl} alt="logo" className="w-full h-full object-cover" />
+                ) : (
+                  <span className="text-muted-foreground text-xs">Logo</span>
+                )}
+              </div>
+              {/* Upload button */}
+              <label className="cursor-pointer">
+                <input
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  disabled={logoUploading}
+                  onChange={async (e) => {
+                    const file = e.target.files?.[0];
+                    if (!file) return;
+                    setLogoUploading(true);
+                    try {
+                      const token = localStorage.getItem("lms_admin_token");
+                      const tenant = localStorage.getItem("tenant_slug");
+                      const fd = new FormData();
+                      fd.append("logo", file);
+                      const sep = tenant ? `?tenant=${tenant}` : "";
+                      const res = await fetch(`/api/settings/upload-logo${sep}`, {
+                        method: "POST",
+                        headers: { ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+                        body: fd,
+                      });
+                      const data = await res.json();
+                      if (data.logoUrl) {
+                        setValue("logoUrl", data.logoUrl, { shouldDirty: true });
+                        toast.success("Logo uploaded!");
+                      } else {
+                        toast.error(data.error || "Upload failed");
+                      }
+                    } catch {
+                      toast.error("Upload failed");
+                    } finally {
+                      setLogoUploading(false);
+                    }
+                  }}
+                />
+                <span className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-border text-sm font-medium transition-colors ${logoUploading ? "opacity-50 cursor-not-allowed" : "hover:bg-accent cursor-pointer"}`}>
+                  {logoUploading ? "Uploading…" : "Upload Image"}
+                </span>
+              </label>
+              {/* أو ادخل الرابط يدوياً */}
+              <Input {...register("logoUrl")} className="flex-1" placeholder="or paste URL…" />
+            </div>
           </div>
 
           <div className="grid grid-cols-2 gap-4">
@@ -250,7 +304,7 @@ export default function SettingsPage() {
         </div>
 
         <AcademyProfileSection />
-        <PaymobSection />
+        <PaymobSection settings={settings} />
 
         <Button type="submit" className="w-full" disabled={updateSettings.isPending}>
           {updateSettings.isPending ? t("loading") : t("saveSettings")}
@@ -337,7 +391,7 @@ function AcademyProfileSection() {
   );
 }
 // ─── Paymob Gateway Section ───────────────────────────────────────────────────
-function PaymobSection() {
+function PaymobSection({ settings }: { settings?: Record<string, any> }) {
   const { t } = useI18n();
   const [cfg, setCfg] = useState({
     paymobApiKey: "",
@@ -353,7 +407,7 @@ function PaymobSection() {
   useEffect(() => {
     fetchWithAuth("/api/settings")
       .then((r) => r.ok ? r.json() : {})
-      .then((data) => {
+      .then((data: Record<string, any>) => {
         setCfg({
           paymobApiKey: data.paymobApiKey ?? "",
           paymobIntegrationId: data.paymobIntegrationId ?? "",
@@ -371,7 +425,15 @@ function PaymobSection() {
     try {
       const res = await fetchWithAuth("/api/settings", {
         method: "PUT",
-        body: JSON.stringify(cfg),
+        body: JSON.stringify({
+          academyName: settings?.academyName ?? "",
+          academyNameAr: settings?.academyNameAr ?? null,
+          logoUrl: settings?.logoUrl ?? null,
+          defaultLanguage: settings?.defaultLanguage ?? "en",
+          currency: settings?.currency ?? "USD",
+          manualPaymentInstructions: settings?.manualPaymentInstructions ?? null,
+          ...cfg,
+        }),
       });
       if (!res.ok) throw new Error();
       setSaved(true);

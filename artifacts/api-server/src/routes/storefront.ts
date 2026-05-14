@@ -1,7 +1,10 @@
 import { Router } from "express";
 import { db, modulesTable, studentsTable, lessonsTable, courseSessionsTable } from "@workspace/db";
-import { coursesTable, settingsTable, categoriesTable, tenantsTable } from "@workspace/db";
+import { coursesTable, settingsTable, categoriesTable, tenantsTable, paymentsTable } from "@workspace/db";
 import { eq, and, sql } from "drizzle-orm";
+import jwt from "jsonwebtoken";
+
+const JWT_SECRET = process.env.SESSION_SECRET || "lms-secret-key";
 
 const router = Router();
 
@@ -172,4 +175,68 @@ router.get("/courses/:id", async (req, res) => {
     res.status(500).json({ error: "Internal server error" });
   }
 });
+// GET /api/storefront/my-payments — مدفوعات الطالب المتحقق منه بالـ JWT
+router.get("/my-payments", async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader?.startsWith("Bearer ")) {
+      return res.status(401).json({ error: "No token provided" });
+    }
+
+    let decoded: any;
+    try {
+      decoded = jwt.verify(authHeader.slice(7), JWT_SECRET);
+    } catch {
+      return res.status(401).json({ error: "Invalid or expired token" });
+    }
+
+    const studentId: number = decoded.id;
+    const tenantId = req.tenantId ?? (await getDefaultTenantId());
+
+    // تحقق إن الطالب ينتمي لنفس الـ tenant
+    const [student] = await db
+      .select({ id: studentsTable.id })
+      .from(studentsTable)
+      .where(and(eq(studentsTable.id, studentId), eq(studentsTable.tenantId, tenantId)))
+      .limit(1);
+
+    if (!student) return res.status(403).json({ error: "Forbidden" });
+
+    const payments = await db
+      .select({
+        id: paymentsTable.id,
+        courseId: paymentsTable.courseId,
+        courseName: coursesTable.title,
+        amount: paymentsTable.amount,
+        status: paymentsTable.status,
+        method: paymentsTable.method,
+        receiptUrl: paymentsTable.receiptUrl,
+        notes: paymentsTable.notes,
+        paidAt: paymentsTable.paidAt,
+        createdAt: paymentsTable.createdAt,
+      })
+      .from(paymentsTable)
+      .leftJoin(coursesTable, eq(paymentsTable.courseId, coursesTable.id))
+      .where(eq(paymentsTable.studentId, studentId))
+      .orderBy(sql`${paymentsTable.createdAt} desc`);
+
+    res.json(
+      payments.map((p) => ({
+        id: p.id,
+        courseId: p.courseId ?? null,
+        courseName: p.courseName ?? null,
+        amount: Number(p.amount),
+        status: p.status,
+        method: p.method,
+        receiptUrl: p.receiptUrl ?? null,
+        notes: p.notes ?? null,
+        paidAt: p.paidAt?.toISOString() ?? null,
+        createdAt: p.createdAt.toISOString(),
+      }))
+    );
+  } catch (err) {
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
 export default router;

@@ -42,18 +42,18 @@ export default function Coupons() {
   const form = useForm<{ code: string; discountType: string; discountValue: number; maxUses: string; expiresAt: string; isActive: boolean }>();
 
   const createMutation = useMutation({
-    mutationFn: (data: any) => fetch("/api/coupons", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) }).then(async (r) => { if (!r.ok) throw new Error((await r.json()).error); return r.json(); }),
+    mutationFn: (data: any) => fetchWithAuth("/api/coupons", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) }).then(async (r) => { if (!r.ok) throw new Error((await r.json()).error); return r.json(); }),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["/api/coupons"] }); setAddDialog(false); form.reset(); toast.success("Coupon created"); },
     onError: (e: any) => toast.error(e.message || "Failed to create coupon"),
   });
 
   const updateMutation = useMutation({
-    mutationFn: ({ id, ...data }: any) => fetch(`/api/coupons/${id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) }).then((r) => r.json()),
+    mutationFn: ({ id, ...data }: any) => fetchWithAuth(`/api/coupons/${id}`, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify(data) }).then((r) => r.json()),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["/api/coupons"] }); setEditCoupon(null); toast.success("Coupon updated"); },
   });
 
   const deleteMutation = useMutation({
-    mutationFn: (id: number) => fetch(`/api/coupons/${id}`, { method: "DELETE" }),
+    mutationFn: (id: number) => fetchWithAuth(`/api/coupons/${id}`, { method: "DELETE" }),
     onSuccess: () => { qc.invalidateQueries({ queryKey: ["/api/coupons"] }); toast.success("Coupon deleted"); },
   });
 
