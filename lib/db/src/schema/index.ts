@@ -12,3 +12,4 @@ export * from "./academy_profile";
 export * from "./certificates";
 export * from "./coupons";
 export * from "./admin_users";
+export * from "./notification"

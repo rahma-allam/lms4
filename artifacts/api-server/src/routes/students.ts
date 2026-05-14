@@ -1,6 +1,7 @@
+// import { notificationsTable } from './../../../../lib/db/src/schema/notification';
 import { Router } from "express";
 import { db } from "@workspace/db";
-import { studentsTable, paymentsTable, coursesTable, activityTable, tenantsTable } from "@workspace/db";
+import { studentsTable, paymentsTable, coursesTable, activityTable, tenantsTable, notificationsTable } from "@workspace/db";
 import { eq, sql, and } from "drizzle-orm";
 import { CreateStudentBody } from "@workspace/api-zod";
 
@@ -339,6 +340,60 @@ router.get("/:id/progress-detail", async (req, res) => {
     });
   } catch (err) {
     req.log.error({ err }, "Error fetching student progress detail");
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// POST /api/students/:id/notify — الأدمن يبعت notification لطالب
+router.post("/:id/notify", async (req, res) => {
+  try {
+    const tenantId = req.tenantId ?? (await getDefaultTenantId());
+    const studentId = parseInt(req.params.id!);
+    const { type = "general", title, titleAr, body, bodyAr } = req.body;
+
+    if (!title) return res.status(400).json({ error: "title is required" });
+
+    const [student] = await db
+      .select({ id: studentsTable.id })
+      .from(studentsTable)
+      .where(and(eq(studentsTable.id, studentId), eq(studentsTable.tenantId, tenantId)));
+
+    if (!student) return res.status(404).json({ error: "Student not found" });
+
+    const [notif] = await db
+      .insert(notificationsTable)
+      .values({ tenantId, studentId, type, title, titleAr: titleAr ?? null, body: body ?? null, bodyAr: bodyAr ?? null })
+      .returning();
+
+    res.status(201).json(notif);
+  } catch (err) {
+    req.log.error({ err }, "Error sending notification");
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// POST /api/students/notify-all — الأدمن يبعت لكل الطلاب
+router.post("/notify-all", async (req, res) => {
+  try {
+    const tenantId = req.tenantId ?? (await getDefaultTenantId());
+    const { type = "general", title, titleAr, body, bodyAr } = req.body;
+
+    if (!title) return res.status(400).json({ error: "title is required" });
+
+    const students = await db
+      .select({ id: studentsTable.id })
+      .from(studentsTable)
+      .where(eq(studentsTable.tenantId, tenantId));
+
+    if (students.length === 0) return res.json({ sent: 0 });
+
+    await db.insert(notificationsTable).values(
+      students.map((s) => ({ tenantId, studentId: s.id, type, title, titleAr: titleAr ?? null, body: body ?? null, bodyAr: bodyAr ?? null }))
+    );
+
+    res.json({ sent: students.length });
+  } catch (err) {
+    req.log.error({ err }, "Error sending bulk notifications");
     res.status(500).json({ error: "Internal server error" });
   }
 });

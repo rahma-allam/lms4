@@ -1,10 +1,10 @@
 import { Router } from "express";
-import { db, modulesTable, studentsTable, lessonsTable, courseSessionsTable } from "@workspace/db";
-import { coursesTable, settingsTable, categoriesTable, tenantsTable, paymentsTable } from "@workspace/db";
-import { eq, and, sql } from "drizzle-orm";
+import { db, modulesTable, studentsTable, lessonsTable, courseSessionsTable, paymentsTable, notificationsTable } from "@workspace/db";
+import { coursesTable, settingsTable, categoriesTable, tenantsTable } from "@workspace/db";
 import jwt from "jsonwebtoken";
 
 const JWT_SECRET = process.env.SESSION_SECRET || "lms-secret-key";
+import { eq, and, sql } from "drizzle-orm";
 
 const router = Router();
 
@@ -175,13 +175,12 @@ router.get("/courses/:id", async (req, res) => {
     res.status(500).json({ error: "Internal server error" });
   }
 });
-// GET /api/storefront/my-payments — مدفوعات الطالب المتحقق منه بالـ JWT
+// GET /api/storefront/my-payments — مدفوعات الطالب المتحقق منه بـ JWT
 router.get("/my-payments", async (req, res) => {
   try {
     const authHeader = req.headers.authorization;
-    if (!authHeader?.startsWith("Bearer ")) {
-      return res.status(401).json({ error: "No token provided" });
-    }
+    if (!authHeader?.startsWith("Bearer "))
+      return res.status(401).json({ error: "Unauthorized" });
 
     let decoded: any;
     try {
@@ -190,17 +189,15 @@ router.get("/my-payments", async (req, res) => {
       return res.status(401).json({ error: "Invalid or expired token" });
     }
 
-    const studentId: number = decoded.id;
     const tenantId = req.tenantId ?? (await getDefaultTenantId());
 
-    // تحقق إن الطالب ينتمي لنفس الـ tenant
+    // تأكد إن الطالب ينتمي لنفس الـ tenant
     const [student] = await db
       .select({ id: studentsTable.id })
       .from(studentsTable)
-      .where(and(eq(studentsTable.id, studentId), eq(studentsTable.tenantId, tenantId)))
-      .limit(1);
+      .where(and(eq(studentsTable.id, decoded.id), eq(studentsTable.tenantId, tenantId)));
 
-    if (!student) return res.status(403).json({ error: "Forbidden" });
+    if (!student) return res.status(404).json({ error: "Student not found" });
 
     const payments = await db
       .select({
@@ -217,7 +214,7 @@ router.get("/my-payments", async (req, res) => {
       })
       .from(paymentsTable)
       .leftJoin(coursesTable, eq(paymentsTable.courseId, coursesTable.id))
-      .where(eq(paymentsTable.studentId, studentId))
+      .where(eq(paymentsTable.studentId, student.id))
       .orderBy(sql`${paymentsTable.createdAt} desc`);
 
     res.json(
@@ -235,6 +232,105 @@ router.get("/my-payments", async (req, res) => {
       }))
     );
   } catch (err) {
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// ── helper: verify student JWT ─────────────────────────────────────────────
+async function verifyStudent(req: any, defaultTenantFn: () => Promise<number>) {
+  const auth = req.headers.authorization as string | undefined;
+  if (!auth?.startsWith("Bearer ")) return null;
+  try {
+    const decoded: any = jwt.verify(auth.slice(7), JWT_SECRET);
+    const tenantId = req.tenantId ?? (await defaultTenantFn());
+    const [s] = await db
+      .select({ id: studentsTable.id })
+      .from(studentsTable)
+      .where(and(eq(studentsTable.id, decoded.id), eq(studentsTable.tenantId, tenantId)));
+    return s ? { studentId: s.id, tenantId } : null;
+  } catch { return null; }
+}
+
+// GET /api/storefront/notifications — كل notifications الطالب
+router.get("/notifications", async (req, res) => {
+  try {
+    const ctx = await verifyStudent(req, getDefaultTenantId);
+    if (!ctx) return res.status(401).json({ error: "Unauthorized" });
+
+    const rows = await db
+      .select()
+      .from(notificationsTable)
+      .where(and(
+        eq(notificationsTable.studentId, ctx.studentId),
+        eq(notificationsTable.tenantId, ctx.tenantId),
+      ))
+      .orderBy(sql`${notificationsTable.createdAt} desc`)
+      .limit(50);
+
+    res.json(rows);
+  } catch {
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// GET /api/storefront/notifications/unread-count
+router.get("/notifications/unread-count", async (req, res) => {
+  try {
+    const ctx = await verifyStudent(req, getDefaultTenantId);
+    if (!ctx) return res.status(401).json({ error: "Unauthorized" });
+
+    const [row] = await db
+      .select({ count: sql<number>`count(*)::int` })
+      .from(notificationsTable)
+      .where(and(
+        eq(notificationsTable.studentId, ctx.studentId),
+        eq(notificationsTable.tenantId, ctx.tenantId),
+        eq(notificationsTable.isRead, false),
+      ));
+
+    res.json({ count: row?.count ?? 0 });
+  } catch {
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// PATCH /api/storefront/notifications/:id/read — علّم كـ مقروءة
+router.patch("/notifications/:id/read", async (req, res) => {
+  try {
+    const ctx = await verifyStudent(req, getDefaultTenantId);
+    if (!ctx) return res.status(401).json({ error: "Unauthorized" });
+
+    await db
+      .update(notificationsTable)
+      .set({ isRead: true })
+      .where(and(
+        eq(notificationsTable.id, parseInt(req.params.id!)),
+        eq(notificationsTable.studentId, ctx.studentId),
+      ));
+
+    res.json({ ok: true });
+  } catch {
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// PATCH /api/storefront/notifications/read-all — علّم كلها مقروءة
+router.patch("/notifications/read-all", async (req, res) => {
+  try {
+    const ctx = await verifyStudent(req, getDefaultTenantId);
+    if (!ctx) return res.status(401).json({ error: "Unauthorized" });
+
+    await db
+      .update(notificationsTable)
+      .set({ isRead: true })
+      .where(and(
+        eq(notificationsTable.studentId, ctx.studentId),
+        eq(notificationsTable.tenantId, ctx.tenantId),
+        eq(notificationsTable.isRead, false),
+      ));
+
+    res.json({ ok: true });
+  } catch {
     res.status(500).json({ error: "Internal server error" });
   }
 });

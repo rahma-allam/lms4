@@ -2,9 +2,10 @@ import { useParams, useLocation } from "wouter";
 import { useI18n } from "@/lib/i18n";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useGetStudent, getGetStudentQueryKey } from "@workspace/api-client-react";
-import { ChevronLeft, Mail, Phone, BookOpen, CreditCard, CheckCircle2, Circle, BarChart3, Trophy, XCircle, UserCheck, UserX } from "lucide-react";
+import { ChevronLeft, Mail, Phone, BookOpen, CreditCard, CheckCircle2, Circle, BarChart3, Trophy, XCircle, UserCheck, UserX, Bell, Send, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { toast } from "sonner";
+import { useState } from "react";
 
 const paymentBadge: Record<string, string> = {
   completed: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400",
@@ -97,6 +98,36 @@ export default function StudentDetail() {
 
   const isActive = student.status === "active";
 
+  const [notifyOpen, setNotifyOpen]   = useState(false);
+  const [notifTitle, setNotifTitle]   = useState("");
+  const [notifBody,  setNotifBody]    = useState("");
+  const [notifType,  setNotifType]    = useState("general");
+
+  const notifyMutation = useMutation({
+    mutationFn: async () => {
+      const tenant = localStorage.getItem("tenant_slug");
+      const token  = localStorage.getItem("admin_token");
+      const res = await fetch(
+        `/api/students/${studentId}/notify${tenant ? `?tenant=${tenant}` : ""}`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...(token ? { Authorization: `Bearer ${token}` } : {}),
+          },
+          body: JSON.stringify({ type: notifType, title: notifTitle, body: notifBody }),
+        }
+      );
+      if (!res.ok) throw new Error("Failed to send");
+    },
+    onSuccess: () => {
+      toast.success("Notification sent!");
+      setNotifyOpen(false);
+      setNotifTitle(""); setNotifBody("");
+    },
+    onError: () => toast.error("Failed to send notification"),
+  });
+
   return (
     <div className="max-w-3xl mx-auto space-y-5">
       <div className="flex items-center gap-3">
@@ -104,7 +135,71 @@ export default function StudentDetail() {
           <ChevronLeft className="w-5 h-5" />
         </button>
         <h1 className="text-xl font-bold">{student.name}</h1>
+        <button
+          onClick={() => setNotifyOpen(true)}
+          className="ms-auto flex items-center gap-1.5 text-xs font-semibold px-3 py-1.5 rounded-full bg-primary/10 text-primary hover:bg-primary/20 transition-colors"
+          title="Send Notification"
+        >
+          <Bell className="w-3.5 h-3.5" />
+          Send Notification
+        </button>
       </div>
+
+      {/* ── Notification Modal ── */}
+      {notifyOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+          <div className="bg-background border border-border rounded-2xl shadow-2xl w-full max-w-md p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <h2 className="font-semibold flex items-center gap-2"><Bell className="w-4 h-4 text-primary" /> Send Notification</h2>
+              <button onClick={() => setNotifyOpen(false)} className="text-muted-foreground hover:text-foreground"><X className="w-4 h-4" /></button>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <label className="text-xs font-medium text-muted-foreground block mb-1">Type</label>
+                <select value={notifType} onChange={(e) => setNotifType(e.target.value)}
+                  className="w-full bg-muted rounded-lg px-3 py-2 text-sm outline-none border border-transparent focus:border-primary">
+                  <option value="general">📢 General</option>
+                  <option value="payment_approved">✅ Payment Approved</option>
+                  <option value="payment_rejected">❌ Payment Rejected</option>
+                  <option value="course_activated">🎓 Course Activated</option>
+                  <option value="quiz_graded">📝 Quiz Graded</option>
+                  <option value="certificate_ready">🏆 Certificate Ready</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="text-xs font-medium text-muted-foreground block mb-1">Title <span className="text-destructive">*</span></label>
+                <input value={notifTitle} onChange={(e) => setNotifTitle(e.target.value)}
+                  placeholder="Notification title"
+                  className="w-full bg-muted rounded-lg px-3 py-2 text-sm outline-none border border-transparent focus:border-primary" />
+              </div>
+
+              <div>
+                <label className="text-xs font-medium text-muted-foreground block mb-1">Message</label>
+                <textarea value={notifBody} onChange={(e) => setNotifBody(e.target.value)}
+                  rows={3} placeholder="Optional message body..."
+                  className="w-full bg-muted rounded-lg px-3 py-2 text-sm outline-none border border-transparent focus:border-primary resize-none" />
+              </div>
+            </div>
+
+            <div className="flex gap-2 pt-1">
+              <button onClick={() => setNotifyOpen(false)}
+                className="flex-1 py-2 rounded-lg border border-border text-sm font-medium hover:bg-muted transition-colors">
+                Cancel
+              </button>
+              <button
+                onClick={() => notifyMutation.mutate()}
+                disabled={!notifTitle.trim() || notifyMutation.isPending}
+                className="flex-1 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-semibold flex items-center justify-center gap-1.5 hover:bg-primary/90 disabled:opacity-50 transition-colors"
+              >
+                <Send className="w-3.5 h-3.5" />
+                {notifyMutation.isPending ? "Sending..." : "Send"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <div className="bg-card border border-card-border rounded-xl p-5">
         <div className="flex items-start gap-4">
