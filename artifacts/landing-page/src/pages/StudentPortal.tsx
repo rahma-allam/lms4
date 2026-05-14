@@ -314,14 +314,26 @@ type ApiMessage = {
 function MessagesTab({
   studentId,
   studentName,
-  courseId,
+  enrollments,
   lang,
 }: {
   studentId: number;
   studentName: string;
-  courseId: number | null | undefined;
+  enrollments: any[] | undefined;
   lang: string;
 }) {
+  // الكورس المختار للمحادثة
+  const [selectedCourseId, setSelectedCourseId] = useState<number | null>(null);
+
+  // تحديث الكورس الافتراضي لما تتحمل الـ enrollments
+  useEffect(() => {
+    if (!selectedCourseId && enrollments && enrollments.length > 0) {
+      setSelectedCourseId(enrollments[0].courseId ?? null);
+    }
+  }, [enrollments]);
+
+  const courseId = selectedCourseId;
+
   const [messages, setMessages]   = useState<ApiMessage[]>([]);
   const [input, setInput]         = useState("");
   const [sending, setSending]     = useState(false);
@@ -329,6 +341,14 @@ function MessagesTab({
   const [error, setError]         = useState<string | null>(null);
   const lastIdRef                 = useRef<number>(0);
   const bottomRef                 = useRef<HTMLDivElement>(null);
+
+  // reset الرسائل لما يغير الكورس
+  useEffect(() => {
+    setMessages([]);
+    lastIdRef.current = 0;
+    setLoading(true);
+    setError(null);
+  }, [courseId]);
 
   // ── رابط الـ API (private chat طالب ↔ مدرب) ──────────────────────────
   const baseUrl = courseId
@@ -445,6 +465,27 @@ function MessagesTab({
 
   return (
     <div className="bg-card border border-border rounded-2xl overflow-hidden flex flex-col" style={{ minHeight: 400 }}>
+      {/* Course selector - يظهر بس لو في أكتر من كورس */}
+      {enrollments && enrollments.length > 1 && (
+        <div className="px-4 pt-4 pb-2">
+          <select
+            value={courseId ?? ""}
+            onChange={(e) => {
+              const val = parseInt(e.target.value);
+              setSelectedCourseId(isNaN(val) ? null : val);
+            }}
+            className="w-full bg-muted border border-border rounded-xl px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-primary/30"
+            dir={lang === "ar" ? "rtl" : "ltr"}
+          >
+            {enrollments.map((enr: any) => (
+              <option key={enr.courseId} value={enr.courseId}>
+                {enr.courseTitle || enr.courseTitleAr || (lang === "ar" ? `كورس #${enr.courseId}` : `Course #${enr.courseId}`)}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
+
       {/* Header */}
       <div className="px-5 py-4 border-b border-border flex items-center gap-2">
         <MessageCircle className="w-4 h-4 text-primary" />
@@ -1133,7 +1174,7 @@ export default function StudentPortal() {
             {/* ─── MESSAGES ─── */}
             {activeTab === "messages" && (
               <motion.div key="messages" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }}>
-                <MessagesTab studentId={user.id} studentName={user.name} courseId={user.courseId} lang={lang} />
+                <MessagesTab studentId={user.id} studentName={user.name} enrollments={enrollments} lang={lang} />
               </motion.div>
             )}
           </AnimatePresence>

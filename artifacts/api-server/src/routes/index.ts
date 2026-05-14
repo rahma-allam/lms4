@@ -76,6 +76,10 @@ router.use("/auth", authRouter);
 router.use("/admin-auth", adminAuthRouter);
 
 // ========== Instructor Routes ==========
+// الشات: الطالب يقدر يقرأ ويرسل رسائل بـ student token
+router.get("/instructors/chat/:courseId/private/:studentId", allowStudent, instructorsRouter);
+router.post("/instructors/chat/:courseId", allowStudent, instructorsRouter);
+// باقي routes الـ instructors محمية بـ requireInstructor
 router.use("/instructors", requireInstructor, instructorsRouter);
 
 // ========== Admin-Protected Routes ==========
